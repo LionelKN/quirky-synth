@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Quirky 8‑Bit Synth (Standalone)</title>
+  <title>Quirky 8-Bit Synth (Standalone)</title>
   <meta name="theme-color" content="#10b981" />
   <!-- Tailwind (for the existing classes) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -12,14 +12,15 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <!-- Tone.js (UMD) -->
   <script src="https://unpkg.com/tone@14.8.49/build/Tone.min.js"></script>
-  <!-- Babel for in-browser JSX transform (simple deployment) -->
+  <!-- Babel for in-browser JSX transform -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>html,body,#root{height:100%;}</style>
 </head>
 <body class="bg-zinc-900 text-zinc-100">
   <div id="root"></div>
 
-  <script type="text/babel">
+  <!-- NOTE the data-presets="react" here -->
+  <script type="text/babel" data-presets="react">
     const { useEffect, useMemo, useRef, useState } = React;
     const Tone = window.Tone;
 
@@ -318,6 +319,15 @@
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<Quirky8BitSynth/>);
+ <script>
+    window.addEventListener('error', (e)=>{
+      const box = document.createElement('pre');
+      box.style.position='fixed'; box.style.left='12px'; box.style.bottom='12px'; box.style.maxWidth='90%';
+      box.style.background='rgba(239,68,68,0.15)'; box.style.color='#fecaca'; box.style.padding='8px 10px';
+      box.style.borderRadius='8px'; box.style.fontSize='12px'; box.style.zIndex='9999';
+      box.textContent = (e.error && e.error.stack) ? e.error.stack : (e.message || 'Unknown error');
+      document.body.appendChild(box);
+    });
   </script>
 </body>
 </html>
