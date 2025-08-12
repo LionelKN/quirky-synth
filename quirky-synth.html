@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quirky 8‑Bit Synth (Standalone)</title>
+  <meta name="theme-color" content="#10b981" />
+  <!-- Tailwind (for the existing classes) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 UMD -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Tone.js (UMD) -->
+  <script src="https://unpkg.com/tone@14.8.49/build/Tone.min.js"></script>
+  <!-- Babel for in-browser JSX transform (simple deployment) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>html,body,#root{height:100%;}</style>
+</head>
+<body class="bg-zinc-900 text-zinc-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+    const Tone = window.Tone;
+
+    /* ================= UI (compact) ================= */
+    const Row = ({ label, children }) => (
+      <div className="flex gap-2 items-center"><label className="text-sm w-28">{label}</label>{children}</div>
+    );
+    const Slider = ({ min, max, step=1, value, onChange, post }) => (
+      <>
+        <input type="range" min={min} max={max} step={step} value={value} onChange={e=>onChange(parseFloat(e.target.value))} />
+        <span className="text-sm w-16 text-right">{post ? post(value) : value}</span>
+      </>
+    );
+    const Select = ({ value, onChange, opts }) => (
+      <select className="bg-zinc-900 rounded px-2 py-1" value={value} onChange={e=>onChange(e.target.value)}>
+        {opts.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+    const Toggle = ({ id, checked, onChange, label }) => (
+      <label className="flex items-center gap-2"><input id={id} type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)} /><span className="text-sm">{label}</span></label>
+    );
+
+    /* ================= Music helpers ================= */
+    const NOTE_TO_MIDI={C:0,"C#":1,Db:1,D:2,"D#":3,Eb:3,E:4,F:5,"F#":6,Gb:6,G:7,"G#":8,Ab:8,A:9,"A#":10,Bb:10,B:11};
+    const SCALES={Chromatic:[0,1,2,3,4,5,6,7,8,9,10,11],Major:[0,2,4,5,7,9,11],Minor:[0,2,3,5,7,8,10],Dorian:[0,2,3,5,7,9,10],Phrygian:[0,1,3,5,7,8,10],Lydian:[0,2,4,6,7,9,11],Mixolydian:[0,2,4,5,7,9,10],WholeTone:[0,2,4,6,8,10],Pentatonic:[0,3,5,7,10],Hirajoshi:[0,2,3,7,8],InSen:[0,1,5,7,10],Yo:[0,2,5,7,9]};
+    const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+    const nearestInScale=(m,root,scale)=>{const pc=((root%12)+12)%12,pool=[];for(let o=-2;o<=2;o++){const base=root+o*12-(root%12)+pc;for(const off of scale)pool.push(base+off)}let b=pool[0],d=Math.abs(b-m);for(const x of pool){const dd=Math.abs(x-m);if(dd<d){b=x;d=dd}}return b};
+
+    /* ================= Keyboard maps ================= */
+    const CODE_KEYMAP={KeyA:0,KeyZ:0,KeyX:2,KeyC:4,KeyV:5,KeyB:7,KeyN:9,KeyM:11,KeyS:1,KeyD:3,KeyG:6,KeyH:8,KeyJ:10,KeyR:12,KeyF:-1,KeyK:13};
+    const IMAGE_QWERTY={a:0,w:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12,o:13,l:14};
+    const IMAGE_AZERTY={q:0,z:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12,o:13,l:14,m:16};
+    const keyOffsetQuant=code=>Object.hasOwn(CODE_KEYMAP,code)?CODE_KEYMAP[code]:null;
+    const keyOffsetImage=(layout,ch)=>{const map=layout==='azerty'?IMAGE_AZERTY:IMAGE_QWERTY;return Object.hasOwn(map,ch)?map[ch]:null};
+    function calcMidiForKey({quantize,layout,code,ch,rootMidi,scale,octave,octShift,semiShift}){
+      if(quantize){const off=keyOffsetQuant(code);if(off==null)return null;return nearestInScale(rootMidi+off,rootMidi,scale)}
+      const off=keyOffsetImage(layout,ch);if(off==null)return null;const baseC=12*(octave+1)+NOTE_TO_MIDI.C;return baseC+off+(octShift*12+semiShift)
+    }
+
+    /* ================= Component ================= */
+    function Quirky8BitSynth(){
+      const [started,setStarted]=useState(false);
+      const [root,setRoot]=useState('C');
+      const [octave,setOctave]=useState(4);
+      const [scaleName,setScaleName]=useState('Pentatonic');
+      const [quantize,setQuantize]=useState(true);
+      const WAVE_OPTIONS=["pulse","square","sawtooth","triangle","sine"];
+      const [osc1Type,setOsc1Type]=useState('pulse');
+      const [osc2On,setOsc2On]=useState(true);
+      const [osc2Type,setOsc2Type]=useState('pulse');
+      const [osc2Mix,setOsc2Mix]=useState(0.5);
+      const [osc2Detune,setOsc2Detune]=useState(0);
+      const [osc2Semi,setOsc2Semi]=useState(0);
+      const [pw1,setPw1]=useState(0.22),[pwmDepth1,setPwmDepth1]=useState(0.18),[pwmRate1,setPwmRate1]=useState(6);
+      const [pw2,setPw2]=useState(0.22),[pwmDepth2,setPwmDepth2]=useState(0.12),[pwmRate2,setPwmRate2]=useState(5);
+      const [attack,setAttack]=useState(0.01),[release,setRelease]=useState(0.2),[glide,setGlide]=useState(0.02);
+      const [bpm,setBpm]=useState(120);
+      const [seqOn,setSeqOn]=useState(false),[seqRate,setSeqRate]=useState('16n'),[seqLength,setSeqLength]=useState(16);
+      const [steps,setSteps]=useState(()=>Array.from({length:16},(_,i)=>({on:i%2===0,degree:i%5,octave:0,gate:0.9,vel:0.8,accent:i%4===0})));
+      const [playhead,setPlayhead]=useState(0);
+      const [bits,setBits]=useState(3),[crushWet,setCrushWet]=useState(1.0),[preCrush,setPreCrush]=useState(2.0),[turboCrush,setTurboCrush]=useState(true);
+      const [drive,setDrive]=useState(0.35);
+      const [sahOn,setSahOn]=useState(true),[sahRate,setSahRate]=useState(3000),[sahJitter,setSahJitter]=useState(0.15),[sahWet,setSahWet]=useState(0.5);
+      const [lpfCut,setLpfCut]=useState(1200),[lpfRes,setLpfRes]=useState(0.5);
+      const [stereoSpread,setStereoSpread]=useState(0.7);
+      const [kbdLayout,setKbdLayout]=useState(()=> (typeof navigator!=='undefined' && (navigator.language||'').toLowerCase().startsWith('fr'))?'azerty':'qwerty');
+      const [keyOctShift,setKeyOctShift]=useState(0);
+      const [keySemiShift,setKeySemiShift]=useState(0);
+
+      const scale=useMemo(()=>SCALES[scaleName],[scaleName]);
+      const rootMidi=useMemo(()=>12*(octave+1)+NOTE_TO_MIDI[root],[root,octave]);
+      const s1Ref=useRef(null), s2Ref=useRef(null);
+      const pan1Ref=useRef(null), pan2Ref=useRef(null), mix1Ref=useRef(null), mix2Ref=useRef(null);
+      const preDriveRef=useRef(null), crusher1Ref=useRef(null), crusher2Ref=useRef(null), distortRef=useRef(null);
+      const sahNodeRef=useRef(null), sahDryRef=useRef(null), sahWetRef=useRef(null), sahSplitRef=useRef(null), sahSumRef=useRef(null);
+      const lpfRef=useRef(null), limiterRef=useRef(null);
+      const lfo1Ref=useRef(null), lfo2Ref=useRef(null); const seqRef=useRef(null);
+      const sahWorkletReadyRef=useRef(false);
+
+      useEffect(()=>{function detect(e){ if(e.code==='KeyA'){ const ch=(e.key||'').toLowerCase(); setKbdLayout(ch==='q'?'azerty':'qwerty') } } window.addEventListener('keydown',detect); return()=>window.removeEventListener('keydown',detect)},[]);
+
+      useEffect(()=>{
+        if(!started) return;
+        const s1=new Tone.MonoSynth({oscillator:{type:osc1Type,width:pw1},envelope:{attack,decay:0.08,sustain:0.2,release},portamento:glide});
+        const s2=new Tone.MonoSynth({oscillator:{type:osc2Type,width:pw2},envelope:{attack,decay:0.08,sustain:0.2,release},portamento:glide});
+        const p1=new Tone.Panner(-stereoSpread), p2=new Tone.Panner(+stereoSpread);
+        const mix1=new Tone.Gain(1-(osc2On?osc2Mix:0)), mix2=new Tone.Gain(osc2On?osc2Mix:0), preFX=new Tone.Gain(1);
+        s1.connect(p1).connect(mix1); s2.connect(p2).connect(mix2); mix1.connect(preFX); mix2.connect(preFX);
+        const preDrive=new Tone.Gain(preCrush);
+        const crush1=new Tone.BitCrusher(bits); crush1.wet.value=crushWet;
+        const crush2=new Tone.BitCrusher(Math.max(1,Math.min(3,Math.floor(bits-1)))); crush2.wet.value=(turboCrush?crushWet:0);
+        const distort=new Tone.Distortion(drive);
+        const split=new Tone.Gain(1), dryG=new Tone.Gain(1), wetG=new Tone.Gain(sahOn?sahWet:0), sumG=new Tone.Gain(1);
+        let sahNode=null; try{ if(sahWorkletReadyRef.current){const raw=Tone.getContext().rawContext; sahNode=new AudioWorkletNode(raw,'downsample-hold',{numberOfInputs:1,numberOfOutputs:1}); sahNode.parameters.get('rate').value=sahRate; sahNode.parameters.get('jitter').value=sahJitter;}}catch{}
+        const lpf=new Tone.Filter(lpfCut,'lowpass',-12); try{ lpf.Q.value=lpfRes; }catch{}
+        const limiter=new Tone.Limiter(-1);
+        preFX.connect(preDrive).connect(crush1);
+        (turboCrush ? crush1.connect(crush2).connect(distort) : crush1.connect(distort));
+        distort.connect(split); split.connect(dryG); if(sahNode){ split.connect(sahNode); sahNode.connect(wetG);} else { split.connect(wetG); }
+        dryG.connect(sumG); wetG.connect(sumG);
+        sumG.connect(lpf).connect(limiter).toDestination();
+        const addPWM=(s,pw,depth,rate)=>{const o=s.oscillator; if(o?.width?.connect){const l=new Tone.LFO(rate,Math.max(0.01,pw-depth),Math.min(0.99,pw+depth)).start(); l.connect(o.width); return l} return null};
+        const l1=addPWM(s1,pw1,pwmDepth1,pwmRate1), l2=addPWM(s2,pw2,pwmDepth2,pwmRate2);
+        s1Ref.current=s1; s2Ref.current=s2; pan1Ref.current=p1; pan2Ref.current=p2; mix1Ref.current=mix1; mix2Ref.current=mix2;
+        preDriveRef.current=preDrive; crusher1Ref.current=crush1; crusher2Ref.current=crush2; distortRef.current=distort;
+        sahNodeRef.current=sahNode; sahDryRef.current=dryG; sahWetRef.current=wetG; sahSplitRef.current=split; sahSumRef.current=sumG;
+        lpfRef.current=lpf; limiterRef.current=limiter; lfo1Ref.current=l1; lfo2Ref.current=l2; Tone.Transport.bpm.value=bpm;
+        if (seqOn) { const loop=new Tone.Loop((time)=>{ setPlayhead(p=>(p+1)%seqLength); const tps=Tone.Time(seqRate).toTicks(), total=tps*seqLength; const i=Math.floor((Tone.Transport.ticks % total)/tps)%seqLength; const st=steps[i]; if(st?.on){ const deg=((st.degree%scale.length)+scale.length)%scale.length; const m=rootMidi+scale[deg]+12*st.octave; const note=quantize?nearestInScale(m,rootMidi,scale):m; const dur=Tone.Time(seqRate).toSeconds()*st.gate; const vel=Math.max(0,Math.min(1,(st.vel??0.8)+(st.accent?0.3:0))); triggerBothAR(s1,s2,note,dur,time,vel,osc2Semi);} },seqRate); loop.start(0); seqRef.current=loop; }
+        return()=>{ try{seqRef.current?.dispose()}catch{}; for(const n of [l1,l2,s1,s2,p1,p2,mix1,mix2,preDrive,crush1,crush2,distort,split,dryG,wetG,sumG,lpf,limiter]){try{n?.dispose()}catch{}} try{sahNode?.disconnect()}catch{} s1Ref.current=s2Ref.current=pan1Ref.current=pan2Ref.current=mix1Ref.current=mix2Ref.current=null; preDriveRef.current=crusher1Ref.current=crusher2Ref.current=distortRef.current=null; sahNodeRef.current=sahDryRef.current=sahWetRef.current=sahSplitRef.current=sahSumRef.current=null; lpfRef.current=limiterRef.current=lfo1Ref.current=lfo2Ref.current=null; };
+      },[started,osc1Type,pw1,pwmDepth1,pwmRate1,osc2On,osc2Type,pw2,pwmDepth2,pwmRate2,osc2Mix,osc2Detune,osc2Semi,bits,crushWet,preCrush,turboCrush,drive,sahOn,sahRate,sahJitter,sahWet,lpfCut,lpfRes,stereoSpread,attack,release,glide,bpm,seqOn,seqRate,seqLength,steps,scale,rootMidi,quantize]);
+
+      const setIf=(obj,path,val)=>{try{let t=obj; const P=path.split('.'); for(let i=0;i<P.length-1;i++) t=t?.[P[i]]; if(t&&P.at(-1) in t) t[P.at(-1)]=val}catch{}};
+      const ramp=(param,val,sec=0.05)=>{try{param?.rampTo?param.rampTo(val,sec):(param.value=val)}catch{}};
+      useEffect(()=>{
+        setIf(s1Ref.current,'portamento',glide); setIf(s2Ref.current,'portamento',glide);
+        setIf(s1Ref.current,'envelope.attack',attack); setIf(s2Ref.current,'envelope.attack',attack);
+        setIf(s1Ref.current,'envelope.release',release); setIf(s2Ref.current,'envelope.release',release);
+        if(crusher1Ref.current) crusher1Ref.current.bits=bits; if(crusher2Ref.current) crusher2Ref.current.bits=Math.max(1,Math.min(3,Math.floor(bits-1)));
+        ramp(crusher1Ref.current?.wet,crushWet,0.02); ramp(crusher2Ref.current?.wet,turboCrush?crushWet:0,0.02);
+        ramp(preDriveRef.current?.gain,preCrush,0.02); setIf(distortRef.current,'distortion',drive);
+        ramp(sahWetRef.current?.gain,sahOn?sahWet:0,0.05);
+        ramp(pan1Ref.current?.pan,-stereoSpread,0.05); ramp(pan2Ref.current?.pan,+stereoSpread,0.05);
+        ramp(mix1Ref.current?.gain,1-(osc2On?osc2Mix:0),0.03); ramp(mix2Ref.current?.gain,(osc2On?osc2Mix:0),0.03);
+        try{s2Ref.current?.detune.rampTo(osc2Detune,0.03)}catch{}
+        if(lpfRef.current){ ramp(lpfRef.current.frequency,lpfCut,0.05); try{ lpfRef.current.Q.rampTo(lpfRes,0.05);}catch{} }
+        Tone.Transport.bpm.rampTo(bpm,0.05);
+      },[glide,attack,release,bits,crushWet,turboCrush,preCrush,drive,sahOn,sahWet,stereoSpread,osc2On,osc2Mix,osc2Detune,lpfCut,lpfRes,bpm]);
+
+      useEffect(()=>{ if(!started) return; try{seqRef.current?.dispose()}catch{}; if(seqOn){const loop=new Tone.Loop((time)=>{setPlayhead(p=>(p+1)%seqLength);const tps=Tone.Time(seqRate).toTicks(),total=tps*seqLength;const i=Math.floor((Tone.Transport.ticks%total)/tps)%seqLength;const st=steps[i]; if(st?.on&&s1Ref.current){const deg=((st.degree%scale.length)+scale.length)%scale.length; const m=rootMidi+scale[deg]+12*st.octave; const note=quantize?nearestInScale(m,rootMidi,scale):m; const dur=Tone.Time(seqRate).toSeconds()*st.gate; const vel=Math.max(0,Math.min(1,(st.vel??0.8)+(st.accent?0.3:0))); triggerBothAR(s1Ref.current,s2Ref.current,note,dur,time,vel,osc2Semi)}},seqRate); loop.start(0); seqRef.current=loop}},[started,seqOn,seqRate,seqLength,steps,scale,rootMidi,quantize,osc2Semi]);
+
+      useEffect(()=>{const down=new Set(); function kd(e){ if(!started) return; const k=(e.key||'').toLowerCase(); if(!quantize){ if(k==='z'||k==='w'){setKeyOctShift(v=>v-1);return} if(k==='x'){setKeyOctShift(v=>v+1);return} if(k==='c'){setKeySemiShift(v=>v-1);return} if(k==='v'){setKeySemiShift(v=>v+1);return} } const keyId=quantize?e.code:k; const m=calcMidiForKey({quantize,layout:kbdLayout,code:e.code,ch:k,rootMidi,scale,octave,octShift:keyOctShift,semiShift:keySemiShift}); if(m==null||down.has(keyId))return; down.add(keyId); triggerBothAttack(m) } function ku(e){ const k=(e.key||'').toLowerCase(); const keyId=quantize?e.code:k; if(!quantize&&['z','w','x','c','v'].includes(k))return; if(down.has(keyId)){down.delete(keyId); triggerBothRelease()} } window.addEventListener('keydown',kd); window.addEventListener('keyup',ku); return()=>{window.removeEventListener('keydown',kd); window.removeEventListener('keyup',ku)} },[started,quantize,kbdLayout,rootMidi,scale,octave,keyOctShift,keySemiShift,osc2Semi]);
+
+      useEffect(()=>{
+        if(!started || !navigator.requestMIDIAccess) return;
+        const onMIDIMessage = (e)=>{
+          const [status, d1, d2] = e.data; const cmd = status & 0xF0; const note = d1; const vel = (d2||0)/127;
+          if(cmd===0x90 && vel>0){
+            const m = quantize ? nearestInScale(12*(octave+1)+NOTE_TO_MIDI[root] + (note-60), rootMidi, scale) : note;
+            triggerBothAttack(m, vel);
+          } else if(cmd===0x80 || (cmd===0x90 && vel===0)) {
+            triggerBothRelease();
+          }
+        };
+        navigator.requestMIDIAccess({ sysex:false }).then(midi=>{
+          for(const input of midi.inputs.values()) input.onmidimessage = onMIDIMessage;
+          midi.onstatechange = ()=>{ for(const input of midi.inputs.values()) input.onmidimessage = onMIDIMessage; };
+        }).catch(()=>{});
+      }, [started, quantize, octave, root, rootMidi, scale]);
+
+      async function startAudio(){
+        await Tone.start();
+        if(!sahWorkletReadyRef.current){
+          const code=`class DownsampleHoldProcessor extends AudioWorkletProcessor{static get parameterDescriptors(){return[{name:'rate',defaultValue:3000,minValue:50,maxValue:20000,automationRate:'k-rate'},{name:'jitter',defaultValue:0,minValue:0,maxValue:1,automationRate:'k-rate'}]} constructor(){super();this._held=[];this._next=[];} process(inputs,outputs,params){const input=inputs[0],output=outputs[0]; if(!input||input.length===0) return true; const sr=sampleRate,rA=params.rate,jA=params.jitter; for(let ch=0; ch<output.length; ch++){const inp=input[ch]||input[0], out=output[ch]; if(!this._held[ch]){this._held[ch]=0;this._next[ch]=0} let next=this._next[ch], held=this._held[ch]; for(let i=0;i<out.length;i++){ if(next<=0){const r=rA.length>1?rA[i]:rA[0], j=jA.length>1?jA[i]:jA[0]; const eff=Math.max(1,r*(1+((Math.random()*2-1)*j))); const hop=Math.max(1,Math.floor(sr/eff)); next=hop; held=inp?inp[i]:0} out[i]=held; next--} this._next[ch]=next; this._held[ch]=held} return true}} registerProcessor('downsample-hold',DownsampleHoldProcessor);`;
+          const blob=new Blob([code],{type:'application/javascript'});
+          const url=URL.createObjectURL(blob);
+          await Tone.getContext().rawContext.audioWorklet.addModule(url);
+          sahWorkletReadyRef.current=true;
+        }
+        Tone.Transport.start();
+        setStarted(true);
+      }
+
+      function triggerBothAR(s1,s2,midi,dur,time,vel,semi2){try{s1?.triggerAttackRelease(midiToFreq(midi),dur,time,vel)}catch{} try{s2&&s2?.triggerAttackRelease(midiToFreq(midi+(semi2||0)),dur,time,vel)}catch{}}
+      function triggerBothAttack(midi,vel=0.85){try{s1Ref.current?.triggerAttack(midiToFreq(midi),undefined,undefined,vel)}catch{} try{s2Ref.current?.triggerAttack(midiToFreq(midi+osc2Semi),undefined,undefined,vel)}catch{}}
+      function triggerBothRelease(){try{s1Ref.current?.triggerRelease()}catch{} try{s2Ref.current?.triggerRelease()}catch{}}
+
+      return (
+        <div className="min-h-screen w-full bg-zinc-900 text-zinc-100 px-4 py-6">
+          <div className="max-w-6xl mx-auto">
+            <h1 className="text-3xl font-bold mb-2">Quirky 8‑Bit Dual‑Osc Synth (Simple LPF)</h1>
+            <p className="text-zinc-300 mb-6">Layout auto: <span className="font-semibold">{kbdLayout.toUpperCase()}</span>. Quantized: Z X C V B N M (+ S D G H J). R/K up, F down. Unquantized: letter row (W/E/T/Y/U/O sharps). Z/X octave ±, C/V semitone ±.</p>
+            {!started ? (
+              <button onClick={startAudio} className="px-5 py-3 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-zinc-900 font-semibold shadow">Click to Start Audio</button>
+            ) : (
+              <div className="grid xl:grid-cols-4 md:grid-cols-3 gap-4">
+                {/* Scale & Pitch */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">Scale & Pitch</h2>
+                  <Row label="Root"><Select value={root} onChange={setRoot} opts={Object.keys(NOTE_TO_MIDI).filter(n=>!n.includes('b'))} /></Row>
+                  <Row label="Octave"><Slider min={2} max={6} value={octave} onChange={setOctave} /></Row>
+                  <Row label="Scale">
+                    <select className="bg-zinc-900 rounded px-2 py-1 w-full" value={scaleName} onChange={e=>setScaleName(e.target.value)}>
+                      {Object.keys(SCALES).map(s=>(<option key={s} value={s}>{s}</option>))}
+                    </select>
+                  </Row>
+                  <Toggle id="quant" checked={quantize} onChange={setQuantize} label="Quantize to scale" />
+                  <Row label="BPM"><Slider min={60} max={200} value={bpm} onChange={setBpm} /></Row>
+                </div>
+
+                {/* Oscillators */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">Oscillators</h2>
+                  <Row label="Osc1 Wave"><Select value={osc1Type} onChange={setOsc1Type} opts={WAVE_OPTIONS} /></Row>
+                  <Toggle id="osc2on" checked={osc2On} onChange={setOsc2On} label="Osc2 On" />
+                  <Row label="Osc2 Wave"><Select value={osc2Type} onChange={setOsc2Type} opts={WAVE_OPTIONS} /></Row>
+                  <Row label="Mix (→Osc2)"><Slider min={0} max={1} step={0.01} value={osc2Mix} onChange={setOsc2Mix} post={v=>`${(v*100).toFixed(0)}%`} /></Row>
+                  <Row label="Detune (c)"><Slider min={-100} max={100} value={osc2Detune} onChange={setOsc2Detune} /></Row>
+                  <Row label="Semis"><Slider min={-12} max={12} value={osc2Semi} onChange={setOsc2Semi} /></Row>
+                </div>
+
+                {/* PWM 1 */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">PWM — Osc1</h2>
+                  <Row label="Width"><Slider min={0.02} max={0.98} step={0.01} value={pw1} onChange={setPw1} post={v=>v.toFixed(2)} /></Row>
+                  <Row label="Depth"><Slider min={0} max={0.48} step={0.01} value={pwmDepth1} onChange={setPwmDepth1} post={v=>v.toFixed(2)} /></Row>
+                  <Row label="Rate (Hz)"><Slider min={0.1} max={20} step={0.1} value={pwmRate1} onChange={setPwmRate1} post={v=>v.toFixed(1)} /></Row>
+                </div>
+
+                {/* PWM 2 */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">PWM — Osc2</h2>
+                  <Row label="Width"><Slider min={0.02} max={0.98} step={0.01} value={pw2} onChange={setPw2} post={v=>v.toFixed(2)} /></Row>
+                  <Row label="Depth"><Slider min={0} max={0.48} step={0.01} value={pwmDepth2} onChange={setPwmDepth2} post={v=>v.toFixed(2)} /></Row>
+                  <Row label="Rate (Hz)"><Slider min={0.1} max={20} step={0.1} value={pwmRate2} onChange={setPwmRate2} post={v=>v.toFixed(1)} /></Row>
+                </div>
+
+                {/* 8‑bit + Downsample */}
+                <div className="col-span-2 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">8‑Bit Grit + Downsample</h2>
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="space-y-3">
+                      <Row label="Bits"><Slider min={1} max={6} step={1} value={bits} onChange={setBits} post={v=>`${v}-bit`} /></Row>
+                      <Row label="Crush Wet"><Slider min={0} max={1} step={0.01} value={crushWet} onChange={setCrushWet} post={v=>v.toFixed(2)} /></Row>
+                      <Row label="Pre‑Crush"><Slider min={0.5} max={6} step={0.1} value={preCrush} onChange={setPreCrush} post={v=>`×${v.toFixed(1)}`} /></Row>
+                      <Toggle id="turbo" checked={turboCrush} onChange={setTurboCrush} label="Turbo double‑crush" />
+                      <Row label="Drive"><Slider min={0} max={1} step={0.01} value={drive} onChange={setDrive} post={v=>v.toFixed(2)} /></Row>
+                    </div>
+                    <div className="space-y-3">
+                      <Toggle id="sahon" checked={sahOn} onChange={setSahOn} label="Downsample Enable" />
+                      <Row label="Rate (Hz)"><Slider min={50} max={8000} value={sahRate} onChange={setSahRate} /></Row>
+                      <Row label="Jitter"><Slider min={0} max={1} step={0.01} value={sahJitter} onChange={setSahJitter} post={v=>v.toFixed(2)} /></Row>
+                      <Row label="Downsample Wet"><Slider min={0} max={1} step={0.01} value={sahWet} onChange={setSahWet} post={v=>v.toFixed(2)} /></Row>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Simple Low‑Pass Filter */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">Low‑Pass Filter</h2>
+                  <Row label="Cutoff (Hz)"><Slider min={60} max={12000} value={lpfCut} onChange={setLpfCut} /></Row>
+                  <Row label="Resonance (Q)"><Slider min={0} max={20} step={0.01} value={lpfRes} onChange={setLpfRes} post={v=>v.toFixed(2)} /></Row>
+                </div>
+
+                {/* Env & Stereo */}
+                <div className="col-span-1 space-y-3 p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <h2 className="text-xl font-semibold">Env & Glide</h2>
+                  <Row label="Attack"><Slider min={0.001} max={0.2} step={0.001} value={attack} onChange={setAttack} post={v=>v.toFixed(3)} /></Row>
+                  <Row label="Release"><Slider min={0.02} max={1.0} step={0.01} value={release} onChange={setRelease} post={v=>v.toFixed(2)} /></Row>
+                  <Row label="Glide"><Slider min={0} max={0.2} step={0.001} value={glide} onChange={setGlide} post={v=>v.toFixed(3)} /></Row>
+                  <h2 className="text-xl font-semibold pt-2">Stereo</h2>
+                  <Row label="Spread"><Slider min={-1} max={1} step={0.01} value={stereoSpread} onChange={setStereoSpread} post={v=>v.toFixed(2)} /></Row>
+                </div>
+
+                {/* Step Sequencer */}
+                <div className="col-span-full p-4 bg-zinc-800/60 rounded-2xl shadow">
+                  <div className="flex items-center justify-between gap-4 mb-3">
+                    <h2 className="text-xl font-semibold">Step Sequencer</h2>
+                    <div className="flex flex-wrap gap-4 items-center">
+                      <Toggle id="seqon" checked={seqOn} onChange={setSeqOn} label="Enable" />
+                      <div className="flex items-center gap-2 text-sm">Rate
+                        <select className="bg-zinc-900 rounded px-2 py-1" value={seqRate} onChange={e=>setSeqRate(e.target.value)}>
+                          <option>16n</option><option>8n</option><option>8t</option><option>4n</option>
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm">Length
+                        <input type="range" min={1} max={16} value={seqLength} onChange={e=>setSeqLength(parseInt(e.target.value))} />
+                        <span className="w-6 text-right">{seqLength}</span>
+                      </div>
+                      <button onClick={()=>setSteps(Array.from({length:16},(_,i)=>({on:i%2===0,degree:i%5,octave:0,gate:0.9,vel:0.8,accent:i%4===0})))} className="px-3 py-1 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-sm">Reset</button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-8 gap-2">
+                    {steps.map((st,i)=> (
+                      <div key={i} className={`p-2 rounded-xl ${i===playhead?"bg-emerald-600/30":"bg-zinc-900/60"}`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={st.on} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,on:e.target.checked}:S))} />{i+1}</label>
+                          <span className="text-[10px] text-zinc-400">{i<seqLength?"●":"○"}</span>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 text-xs">Deg<input type="number" min={0} max={Math.max(0,(scale?.length||1)-1)} value={st.degree} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,degree:parseInt(e.target.value||"0")}:S))} className="w-14 bg-zinc-950 rounded px-1 py-0.5" /></div>
+                          <div className="flex items-center gap-2 text-xs">Oct<input type="number" min={-2} max={2} value={st.octave} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,octave:parseInt(e.target.value||"0")}:S))} className="w-14 bg-zinc-950 rounded px-1 py-0.5" /></div>
+                          <div className="flex items-center gap-2 text-xs">Gate<input type="range" min={0.1} max={1} step={0.05} value={st.gate} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,gate:parseFloat(e.target.value)}:S))} /></div>
+                          <div className="flex items-center gap-2 text-xs">Vel<input type="range" min={0} max={1} step={0.01} value={st.vel} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,vel:parseFloat(e.target.value)}:S))} /><span className="text-[10px] w-8 text-right">{(st.vel??0.8).toFixed(2)}</span></div>
+                          <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!st.accent} onChange={e=>setSteps(a=>a.map((S,j)=>j===i?{...S,accent:e.target.checked}:S))} />Accent (+0.3)</label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<Quirky8BitSynth/>);
+  </script>
+</body>
+</html>
